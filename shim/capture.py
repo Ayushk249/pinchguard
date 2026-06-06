@@ -153,6 +153,8 @@ class HFCapturer:
         token_position: str = DEFAULT_TOKEN_POSITION,
         max_new_tokens: int = 64,
         dtype: str | None = None,
+        device_map: str | None = None,
+        quantization: str | None = None,
     ) -> None:
         import torch  # type: ignore[import-not-found]
         from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore[import-not-found]
@@ -168,15 +170,28 @@ class HFCapturer:
         self.layers = tuple(layers)
         self.token_position = token_position
         self.max_new_tokens = max_new_tokens
+        self.device_map = device_map
+        self.quantization = quantization
 
-        load_dtype = getattr(torch, dtype) if dtype else torch.float32
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+
         # `low_cpu_mem_usage=True` skips the float32 init copy when we target
         # float16 — important on Codespaces, where total RAM is ~8 GiB and
         # the float32 spike OOMs even a 0.5B model.
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name, dtype=load_dtype, low_cpu_mem_usage=True
-        )
+        load_kwargs: dict[str, Any] = {"low_cpu_mem_usage": True}
+        if device_map is not None:
+            load_kwargs["device_map"] = device_map
+
+        quant_config = self._build_quant_config(quantization)
+        if quant_config is not None:
+            # Gotcha (1): bitsandbytes owns the compute dtype. Passing `dtype=`
+            # alongside a `quantization_config` conflicts, so only one is ever
+            # set — the quant config here, or the explicit dtype below.
+            load_kwargs["quantization_config"] = quant_config
+        else:
+            load_kwargs["dtype"] = getattr(torch, dtype) if dtype else torch.float32
+
+        self.model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
         self.model.eval()
 
         self._layer_modules = self._resolve_layers()
@@ -186,6 +201,32 @@ class HFCapturer:
                 raise ValueError(
                     f"layer {layer} out of range; model has {len(self._layer_modules)} layers"
                 )
+
+    def _build_quant_config(self, quantization: str | None) -> Any:
+        """Map a quantization name to a bitsandbytes `BitsAndBytesConfig`.
+
+        `None` → full-precision load (the existing 0.5B CPU path, untouched).
+        `"nf4"` is the verified Blackwell 4-bit path (Q4): nf4 + double-quant,
+        float16 compute. `"int8"` is the 8-bit fallback rung. The bnb import is
+        deferred so the unquantized path never requires bitsandbytes installed.
+        """
+        if quantization is None:
+            return None
+        from transformers import BitsAndBytesConfig  # type: ignore[import-not-found]
+
+        torch = self._torch
+        if quantization == "nf4":
+            return BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+            )
+        if quantization == "int8":
+            return BitsAndBytesConfig(load_in_8bit=True)
+        raise ValueError(
+            f"quantization={quantization!r} not supported (use 'nf4' or 'int8')"
+        )
 
     def _resolve_layers(self) -> Any:
         m = self.model
@@ -204,6 +245,11 @@ class HFCapturer:
             _sanitize_messages(messages), tokenize=False, add_generation_prompt=True
         )
         inputs = self.tokenizer(prompt_text, return_tensors="pt")
+        # Gotcha (2): under `device_map` the weights live on GPU, so prompt
+        # tensors must be moved to the model's device or the forward errors on
+        # a device mismatch. The CPU-only path is a no-op move.
+        if self.device_map is not None:
+            inputs = inputs.to(next(self.model.parameters()).device)
 
         captured: dict[int, Any] = {}
         handles = []
@@ -247,6 +293,10 @@ class HFCapturer:
             "layers": list(self.layers),
             "dtype": DEFAULT_DTYPE,
             "capture_runtime": "hf-eager",
+            # Provenance for the M5 manifest: `dtype` is the *stored activation*
+            # dtype (fp16); `quantization` records the model's compute precision
+            # (null on the full-precision path), which `dtype` alone can't convey.
+            "quantization": self.quantization,
         }
         return CaptureResult(
             completion_text=completion,

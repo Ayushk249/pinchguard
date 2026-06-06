@@ -78,6 +78,11 @@ def _build_default_capturer() -> Capturer:
     layers = _resolve_layers_env()
     token_position = os.environ.get("PINCHGUARD_TOKEN_POSITION", DEFAULT_TOKEN_POSITION)
     model_name = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-0.5B-Instruct")
+    # Unset/empty → None so the unquantized, CPU (no device_map) path stays the
+    # default and 0.5B parity is fully backward-compatible. `nf4`/`auto` only
+    # engage for the 32B bring-up when these are exported.
+    device_map = os.environ.get("PINCHGUARD_DEVICE_MAP") or None
+    quantization = os.environ.get("PINCHGUARD_QUANT") or None
 
     if backend == "mock":
         return MockCapturer(layers=layers, token_position=token_position, model_id=model_name)
@@ -91,6 +96,8 @@ def _build_default_capturer() -> Capturer:
                 layers=layers,
                 token_position=token_position,
                 max_new_tokens=max_new_tokens,
+                device_map=device_map,
+                quantization=quantization,
             )
         except Exception as exc:  # pragma: no cover — environment-dependent
             if backend != "auto":
