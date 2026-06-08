@@ -8,10 +8,9 @@ reference repo, which won't exist on the production box.
 See README.md for how `data/axis/` was populated.
 """
 
-from .axis import (
+from .axis_download import (
     AXIS_FILES,
     AXIS_REPO_ID,
-    LOCAL_AXIS_DIR,
     download_axis,
     load_axis,
 )
@@ -19,7 +18,6 @@ from .axis import (
 __all__ = [
     "AXIS_FILES",
     "AXIS_REPO_ID",
-    "LOCAL_AXIS_DIR",
     "download_axis",
     "load_axis",
 ]
