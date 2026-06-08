@@ -1,0 +1,13 @@
+{
+  "model_id": "/datapool/analysis_data/tara/pinchguard/models",
+  "layer": 32,
+  "hook": "module-output of model.model.layers[32]",
+  "token_position": "last_input",
+  "hidden_dim": 5120,
+  "activation_key": "L32",
+  "dtype": "float16",
+  "quantization": "nf4",
+  "capture_runtime": "hf-eager",
+  "step_id": "3aa8491e-bb42-408f-a549-2657361a304d",
+  "npz": "3aa8491e-bb42-408f-a549-2657361a304d.npz"
+}

@@ -28,8 +28,9 @@ Full table in [AGENTS.md §2](./AGENTS.md). Short version:
 | **B · Behavioural Eval** | LLM-judge rubric, human validation | `traces.jsonl` | `traces_enriched.jsonl` with `label_behav` |
 | **C · Probe Eval** | Assistant-axis linear probe, layer/site sweeps | `activations/*.npz` | `probe_scores.jsonl` with `label_probe` |
 | **D · Predictor** | Feature engineering, model selection, ablations | Enriched traces ⋈ probe scores on `step_id` | Trained predictor + CV metrics |
+| **E · Scenarios** | Which conditions to expose an agent to | test-harness | parameters for the test-harness |  
 
-This repo is shared. Concern A is implemented here today; B/C/D will land
+This repo is shared. Concern A is implemented here today; B/C/D/E will land
 alongside as their owners scope and contribute.
 
 ## Project tree
@@ -67,7 +68,7 @@ data/runs/
                          B/C/D can inspect concrete data without rerunning the
                          model. See its note.md for caveats.
   smoke_*/               Local smoke runs (gitignored).
-scenarios/             Scenario YAMLs (placeholder).
+scenarios/             Concern E - Scenario YAMLs (placeholder).
 docs/                  Project docs (placeholder).
 pyproject.toml         uv-managed deps. Extras: `dev` (pytest), `capture`
                        (torch + transformers + nnsight + nnterp), `analysis`.
