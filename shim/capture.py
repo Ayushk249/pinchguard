@@ -303,7 +303,13 @@ class HFCapturer:
 
         try:
             with torch.no_grad():
-                self.model(**inputs)
+                # logits_to_keep=1: run lm_head on the LAST position only. This
+                # forward exists solely to fire the layer hooks (we keep only
+                # tensor[:, -1, :] below); the full-sequence logits it otherwise
+                # computes are discarded — and that ~2.2 GiB spike OOM'd the 24 GB
+                # card around turn ~15 once the context grew. Hooks fire on the
+                # decoder layers regardless, so captured activations are identical.
+                self.model(**inputs, logits_to_keep=1)
         finally:
             for h in handles:
                 h.remove()

@@ -1,0 +1,6 @@
+# WIP — not ready to commit yet
+linear_probe.py
+label_tests*
+
+# Downloaded role activation vectors (large, re-downloadable from HF)
+data/probe/
