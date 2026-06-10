@@ -91,6 +91,7 @@ def enrich_traces(
     dry_run: bool = False,
     delay_between_calls: float = 1.0,
     soul_path: Path | None = None,
+    boundary_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     """Score all rows in traces_path and write to out_path.
 
@@ -101,10 +102,8 @@ def enrich_traces(
     model:                OpenRouter model string override.
     dry_run:              If True, use mock auditor (no API calls).
     delay_between_calls:  Seconds to wait between real API calls.
-    soul_path:            Optional path to a SOUL.md file.  When provided, persona
-                          variables are extracted from it and injected into the judge
-                          prompt template, making the scorer persona-agnostic.
-                          If None, the built-in Cusco defaults are used.
+    soul_path:            Optional path to a SOUL.md file.
+    boundary_path:        Optional path to a BOUNDARY.md file.
 
     Returns the list of enriched row dicts.
     """
@@ -118,7 +117,7 @@ def enrich_traces(
             print(f"[enrich] WARNING: SOUL.md not found at {soul_path} — using defaults.",
                   file=sys.stderr)
         else:
-            persona_vars = load_persona_vars_from_soul(soul_path)
+            persona_vars = load_persona_vars_from_soul(soul_path, boundary_path)
             soul_label = str(soul_path)
             print(f"[enrich] Persona loaded from: {soul_path}")
             print(f"[enrich] Agent name: {persona_vars.get('agent_name', '?')}")
@@ -133,6 +132,23 @@ def enrich_traces(
 
     # Sort by turn (defensive)
     rows.sort(key=lambda r: r.get("turn", 0))
+
+    # Load loop_records.jsonl if present (for soft-trigger scoring)
+    loop_records_by_turn: dict[int, dict[str, Any]] = {}
+    loop_records_path = traces_path.parent / "loop_records.jsonl"
+    if loop_records_path.exists():
+        lr_lines = [l for l in loop_records_path.read_text(encoding="utf-8").splitlines() if l.strip()]
+        for lr_line in lr_lines:
+            try:
+                lr = json.loads(lr_line)
+                t = lr.get("turn")
+                if t is not None:
+                    loop_records_by_turn[int(t)] = lr
+            except Exception:
+                pass
+        print(f"[enrich] loop_records.jsonl loaded: {len(loop_records_by_turn)} turns found.")
+    else:
+        print(f"[enrich] No loop_records.jsonl found — soft trigger scoring will be 0 for all turns.")
 
     # Build per-step histories
     histories = build_histories(rows)
@@ -150,23 +166,28 @@ def enrich_traces(
         turn = row.get("turn", i)
         print(f"  [{i+1}/{total}] turn={turn} step={step_id} ... ", end="", flush=True)
 
+        # Look up this turn's loop record for soft-trigger injection
+        loop_record = loop_records_by_turn.get(int(turn))
+
         try:
             if dry_run:
                 result = _mock_score(row, history)
             else:
                 result = score_step(row, history, model=resolved_model,
-                                    persona_vars=persona_vars)
+                                    persona_vars=persona_vars,
+                                    loop_record=loop_record)
 
             enriched = {
                 **row,
                 "label_behav": result.label_behav,
+                "soft_trigger_score": result.soft_trigger_score,
                 "label_behav_meta": {
                     **result.to_label_behav_meta(judge_model=resolved_model),
                     "soul_file": soul_label,
                 },
             }
             flag = "[DRIFT]" if result.deception_detected else "[ok]   "
-            print(f"{flag}  severity={result.severity}  confidence={result.confidence:.2f}")
+            print(f"{flag}  severity={result.severity}  soft_trigger={result.soft_trigger_score}  confidence={result.confidence:.2f}")
 
         except Exception as exc:
             print(f"ERROR: {exc}")
@@ -242,6 +263,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--boundary-file",
+        type=Path,
+        default=None,
+        metavar="BOUNDARY_MD",
+        help="Optional path to a BOUNDARY.md file containing hard constraints. Appended to core_guardrails.",
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Use mock auditor — no API calls, no key required.",
@@ -296,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         dry_run=args.dry_run,
         delay_between_calls=args.delay,
         soul_path=args.soul_file,
+        boundary_path=args.boundary_file,
     )
     return 0
 

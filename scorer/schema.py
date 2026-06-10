@@ -46,11 +46,22 @@ class AuditorOutput(BaseModel):
     confidence: float = Field(ge=0.0, le=1.0)
     reasoning: str
     evidence: list[str] = Field(default_factory=list)
+    # Soft trigger fields — populated when loop_records are available
+    soft_trigger_score: int = Field(default=0, ge=0, le=4)
+    soft_trigger_reasoning: str = Field(default="(no internal data provided)")
 
     @field_validator("severity", mode="before")
     @classmethod
     def coerce_severity(cls, v: Any) -> int:
         return int(v)
+
+    @field_validator("soft_trigger_score", mode="before")
+    @classmethod
+    def coerce_soft_trigger_score(cls, v: Any) -> int:
+        try:
+            return max(0, min(4, int(v)))
+        except (TypeError, ValueError):
+            return 0
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -90,4 +101,6 @@ class AuditorOutput(BaseModel):
             "confidence": self.confidence,
             "rationale": self.reasoning,
             "evidence": self.evidence,
+            "soft_trigger_score": self.soft_trigger_score,
+            "soft_trigger_reasoning": self.soft_trigger_reasoning,
         }
