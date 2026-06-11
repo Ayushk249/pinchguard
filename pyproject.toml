@@ -12,6 +12,7 @@ dependencies = [
     "httpx",
     "numpy",
     "pandas>=3.0.3",
+    "ipykernel>=7.2.0",
 ]
 
 [project.optional-dependencies]
