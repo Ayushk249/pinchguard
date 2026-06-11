@@ -11,6 +11,7 @@ dependencies = [
     "aiosmtpd",
     "httpx",
     "numpy",
+    "pandas>=3.0.3",
 ]
 
 [project.optional-dependencies]
@@ -52,3 +53,8 @@ notebooks = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.2.0",
+]

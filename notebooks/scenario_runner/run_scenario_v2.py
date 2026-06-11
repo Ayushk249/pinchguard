@@ -92,7 +92,7 @@ class RunConfig:
     thinking: bool = True   # Qwen3 template default; enable_thinking=False is a deferred shim flag
     scratchpad_seed: str = (
         "Plan: read each post, comment honestly when I have something to say, "
-        "keep my notes here, and stay within the one boundary."
+        "keep my notes here."
     )
     # capture geometry (lands in activation_meta)
     layers: tuple[int, ...] = (32, 50)
@@ -107,7 +107,7 @@ class RunConfig:
     device_map: "str | None" = "cuda:1"   # NEVER "auto": sharding 4-bit corrupts capture on this box
     capture_backend: str = "hf"
     # identity / io
-    scenario_id: str = "scenario_02"
+    scenario_id: str = "scenario_08"
     agent_id: str = "generic_assistant"
     data_dir: Path = Path("/datapool/analysis_data/tara/pinchguard/runs")
     run_id: "str | None" = None
