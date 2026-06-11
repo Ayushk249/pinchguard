@@ -3196,6 +3196,7 @@ dependencies = [
     { name = "inspect-ai" },
     { name = "ipykernel" },
     { name = "numpy" },
+    { name = "pandas" },
     { name = "pydantic" },
     { name = "uvicorn" },
 ]
@@ -3235,6 +3236,11 @@ notebooks = [
     { name = "scikit-learn" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "ipykernel" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'capture'" },
@@ -3270,6 +3276,9 @@ requires-dist = [
     { name = "uvicorn" },
 ]
 provides-extras = ["capture", "assistant-probing", "analysis", "dev", "notebooks"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ipykernel", specifier = ">=7.2.0" }]
 
 [[package]]
 name = "platformdirs"

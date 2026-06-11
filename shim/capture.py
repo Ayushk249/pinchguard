@@ -23,9 +23,22 @@ from typing import Any, Protocol
 
 import numpy as np
 
-DEFAULT_LAYERS: tuple[int, ...] = (12, 24)
-DEFAULT_TOKEN_POSITION: str = "last_input"
+# Qwen3-32B has 64 decoder blocks (0..63). L32 is the ~middle layer used for
+# Assistant-Axis *computation* (target_layer=32); L50 sits in the harmful-drift
+# capping band (layers 46:54). BOTH are captured with response-token mean — the
+# published axis (lu-christina/assistant-axis-vectors) was built from activations
+# averaged over the assistant RESPONSE span, so projecting last-input vectors
+# onto it is a convention mismatch. Migrated L32 from last_input → response_mean
+# so both layers match the axis; single folder, one npz with L32 + L50 keys.
+DEFAULT_LAYERS: tuple[int, ...] = (32, 50)
+DEFAULT_TOKEN_POSITION: str = "response_mean"
 DEFAULT_DTYPE: str = "float16"
+
+# Valid `token_position` values. `response_mean` averages the residual stream
+# over the model's *generated* (assistant) tokens — the axis-matched default.
+# `last_input` (final prompt token, no generation) is retained for the legacy
+# convention but is NOT axis-comparable; see assistant_probing/README Concern C.
+VALID_TOKEN_POSITIONS: frozenset[str] = frozenset({"last_input", "response_mean"})
 
 
 @dataclass
@@ -129,6 +142,11 @@ class MockCapturer:
         hidden_dim: int = 8,
         model_id: str = "mock-qwen2.5-0.5b",
     ) -> None:
+        if token_position not in VALID_TOKEN_POSITIONS:
+            raise ValueError(
+                f"token_position={token_position!r} invalid; "
+                f"expected one of {sorted(VALID_TOKEN_POSITIONS)}"
+            )
         self.layers = tuple(layers)
         self.token_position = token_position
         self.hidden_dim = hidden_dim
@@ -185,10 +203,10 @@ class HFCapturer:
         import torch  # type: ignore[import-not-found]
         from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore[import-not-found]
 
-        if token_position != "last_input":
+        if token_position not in VALID_TOKEN_POSITIONS:
             raise ValueError(
-                f"token_position={token_position!r} not yet supported "
-                "(only 'last_input' implemented)"
+                f"token_position={token_position!r} not supported "
+                f"(expected one of {sorted(VALID_TOKEN_POSITIONS)})"
             )
 
         self._torch = torch
@@ -287,6 +305,19 @@ class HFCapturer:
         if self.device_map is not None:
             inputs = inputs.to(next(self.model.parameters()).device)
 
+        if self.token_position == "last_input":
+            return self._capture_last_input(inputs, prompt_text)
+        return self._capture_response_mean(inputs, prompt_text)
+
+    def _capture_last_input(self, inputs: Any, prompt_text: str) -> CaptureResult:
+        """Original byte-stable path: prompt-only forward, last input token.
+
+        Hooks fire on a single forward (no generation context bleed), we keep
+        the [-1] position's hidden state per layer, then run a separate greedy
+        generate for the completion text. Unchanged from the L32 capture every
+        existing analysis depends on.
+        """
+        torch = self._torch
         captured: dict[int, Any] = {}
         handles = []
 
@@ -319,6 +350,93 @@ class HFCapturer:
             vec = tensor[:, -1, :]  # last_input position
             activations[f"L{layer_idx}"] = vec.to(torch.float16).cpu().numpy()
 
+        completion = self._generate_text(inputs)
+        meta = self._meta()
+        return CaptureResult(
+            completion_text=completion,
+            activations=activations,
+            activation_meta=meta,
+            prompt_text=prompt_text,
+        )
+
+    def _capture_response_mean(self, inputs: Any, prompt_text: str) -> CaptureResult:
+        """Mean over the residual stream of the model's *generated* tokens.
+
+        Matches the Assistant-Axis paper's response-token aggregation
+        (`extract_response_activations` → `project`), so cosine similarity
+        against their axis is computed on the same object: the mean hidden
+        state across the assistant turn, NOT the last input token.
+
+        Implementation: register the SAME module-output forward hooks used by
+        the last_input path, then run one greedy generate(). During generation
+        the hook fires once per forward pass (once per generated token); we keep
+        the last-position output each fire and average across fires. Using hooks
+        (not `output_hidden_states`) keeps BOTH folders on the identical
+        "module-output of model.model.layers[L]" definition — avoiding the
+        hidden_states[L] vs [L+1] off-by-one that the README flags as the open
+        cross-check with Lion. One generate pass; no separate prompt forward.
+
+        MEMORY: accumulates one (1, hidden) fp16 vector per generated token per
+        layer — far lighter than retaining full hidden_states, but the hook
+        holds references during generate(). Untested under 24 GB pressure on a
+        grown 15-turn context; bring up on the 48 GB box first, cap generated
+        tokens only if it OOMs.
+        """
+        torch = self._torch
+        # Step 0's forward processes the whole prompt (last position = final
+        # prompt token); each later step processes one new token. We want the
+        # generated tokens' activations, so we DROP the first fire (the prompt
+        # forward) and average over the rest. If max_new_tokens yields only the
+        # prompt fire (immediate EOS), we fall back to that single vector so the
+        # capture never produces an empty mean.
+        per_layer_steps: dict[int, list[Any]] = {idx: [] for idx in self.layers}
+        handles = []
+
+        def _make_hook(idx: int):
+            def _hook(_module, _inp, out):
+                tensor = out[0] if isinstance(out, tuple) else out
+                per_layer_steps[idx].append(tensor[:, -1, :].detach())
+            return _hook
+
+        for layer_idx in self.layers:
+            handles.append(
+                self._layer_modules[layer_idx].register_forward_hook(_make_hook(layer_idx))
+            )
+
+        try:
+            with torch.no_grad():
+                out = self.model.generate(
+                    **inputs,
+                    max_new_tokens=self.max_new_tokens,
+                    do_sample=False,
+                    pad_token_id=self.tokenizer.eos_token_id,
+                    return_dict_in_generate=True,
+                )
+        finally:
+            for h in handles:
+                h.remove()
+
+        activations: dict[str, np.ndarray] = {}
+        for layer_idx, fires in per_layer_steps.items():
+            # Drop the prompt-forward fire (index 0) so we average over GENERATED
+            # tokens only; keep it if it is the sole fire.
+            gen_fires = fires[1:] if len(fires) > 1 else fires
+            stacked = torch.stack(gen_fires, dim=1)  # (batch, n_generated, hidden)
+            mean_vec = stacked.mean(dim=1)  # (batch, hidden)
+            activations[f"L{layer_idx}"] = mean_vec.to(torch.float16).cpu().numpy()
+
+        gen_ids = out.sequences[0, inputs.input_ids.shape[1] :]
+        completion = self.tokenizer.decode(gen_ids, skip_special_tokens=True)
+        meta = self._meta()
+        return CaptureResult(
+            completion_text=completion,
+            activations=activations,
+            activation_meta=meta,
+            prompt_text=prompt_text,
+        )
+
+    def _generate_text(self, inputs: Any) -> str:
+        torch = self._torch
         with torch.no_grad():
             out_ids = self.model.generate(
                 **inputs,
@@ -326,11 +444,12 @@ class HFCapturer:
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
-        completion = self.tokenizer.decode(
+        return self.tokenizer.decode(
             out_ids[0, inputs.input_ids.shape[1] :], skip_special_tokens=True
         )
 
-        meta: dict[str, Any] = {
+    def _meta(self) -> dict[str, Any]:
+        return {
             "token_position": self.token_position,
             "layers": list(self.layers),
             "dtype": DEFAULT_DTYPE,
@@ -340,9 +459,3 @@ class HFCapturer:
             # (null on the full-precision path), which `dtype` alone can't convey.
             "quantization": self.quantization,
         }
-        return CaptureResult(
-            completion_text=completion,
-            activations=activations,
-            activation_meta=meta,
-            prompt_text=prompt_text,
-        )

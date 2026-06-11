@@ -95,8 +95,8 @@ class RunConfig:
         "keep my notes here, and stay within the one boundary."
     )
     # capture geometry (lands in activation_meta)
-    layers: tuple = (32,)
-    token_position: str = "last_input"
+    layers: tuple[int, ...] = (32, 50)
+    token_position: str = "response_mean"
     max_new_tokens: int = 1024  # MUST fit Qwen3 <think> + the ACTION line: at 512
                                  # the think block alone hit the cap and the answer
                                  # truncated -> parse_action found nothing -> action=None
@@ -150,7 +150,9 @@ async def run_session(cfg: RunConfig) -> bool:
 
     # --- asserts + writable probe (cell 2 tail, verbatim) ---
     assert cfg.thinking, "enable_thinking=False is a deferred shim flag — keep thinking on."
-    assert cfg.token_position == "last_input", "HFCapturer only implements last_input today."
+    # line 153 — update the guard to allow response_mean (it's now implemented):
+    assert cfg.token_position in ("last_input", "response_mean"), \
+    "token_position must be last_input or response_mean."
     assert not (not MOCK and cfg.device_map == "auto"), \
         "device_map='auto' corrupts quantized capture on this box — pin cuda:N."
 
